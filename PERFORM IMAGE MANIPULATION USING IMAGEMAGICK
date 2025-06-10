@@ -1,0 +1,344 @@
+PERFORM IMAGE MANIPULATION USING IMAGEMAGICK
+
+ABOUT IMAGEMAGICK:
+Use ImageMagick® to create, edit, compose, or convert bitmap images. It can read and write images in a variety of formats (over 200) including PNG, JPEG, GIF, HEIC, TIFF, DPX, EXR, WebP, Postscript, PDF, and SVG. Use ImageMagick to resize, flip, mirror, rotate, distort, shear and transform images, adjust image colors, apply various special effects, or draw text, lines, polygons, ellipses and Bézier curves.
+ImageMagick is free software delivered as a ready-to-run binary distribution or as source code that you may use, copy, modify, and distribute in both open and proprietary applications. It is distributed under a derived Apache 2.0 license.
+
+
+USE CASE OVERVIEW:
+  -  Take an image and perform Resize of the image to 190*190 and 29*29 resolution
+  -  Then upload the image (resized) to table IMAGE_TABLE_BLOB columns IMAGE and IMAGE_THUMBNAIL
+  -  Upload the original image as it is into ORIGINAL_IMAGES
+
+
+SET UP OVERVIEW:
+In-order to set up the complete scenario,
+ - Identify the Server
+ - Install OCI CLI
+ - Install ImageMagick
+ - Install Oracle Client
+ - Create DB objects.
+
+
+IDENTIFY THE COMPUTE SERVER
+Identify a compute server which will host Oracle client and ImageMagick.
+
+
+INSTALL ORACLE CLIENT
+If Oracle Client is not available, please install the same so that connections to ADB can be made.
+https://docs.oracle.com/en/cloud/paas/autonomous-data-warehouse-cloud/user/connect-preparing.html#GUID-EFAFA00E-54CC-47C7-8C71-E7868279EF3B
+
+
+INSTALL OCI CLI
+Refer to “https://docs.cloud.oracle.com/en-us/iaas/Content/API/Concepts/cliconcepts.htm” and install/configure OCI CLI on your identified compute server
+
+
+INSTALL IMAGEMAGICK
+yum install ImageMagick
+or any method mentioned in “https://imagemagick.org/script/download.php”
+
+
+CREATE DB OBJECTS:
+Below DB Objects would need to be created as part of setting up and providing the solution to process an image and store both original and processed image. 
+Objects are created in the same sequence as they are mentioned below.
+
+CREATE USER
+  New User where the table will exist
+GRANT PRIVILEGES TO USER
+  Grant privileges to new user to perform all below tasks
+CREATE DB DIRECTORY
+  Create DB Directories which will hold the images
+CREATE SEQUENCE
+  Create sequence to be used in table for ID
+CREATE TABLE
+  Create tables to hold Original and Resized images
+CREATE FUNCTION
+  Uploads image to tables
+CREATE PROCEDURE
+  Procedures which take care of executing DB Job and Insert/Update to Tables created above with correct Images
+CREATE CREDENTIAL
+  Create Credential to execute in ADB
+
+
+LIST OF CREATED OBJECTS
+USER       -  ADBUSER
+GRANTS     -  (DWROLE),(CREATE ANY PROCEDURE), (EXECUTE ON DBMS_CLOUD), (UNLIMITED TABLESPACE),(CREATE ANY DIRECTORY)
+DIRECTORY  -  IMAGES, MEDIA_DIR_IMG_ACCESS
+TABLE      -  IMAGE_TABLE_BLOB, ORIGINAL_IMAGES
+PROCEDURE  -  RESIZE_IMAGE_SH_PRC
+SEQUENCE   -  ID
+FUNCTION   -  FILE_TO_BLOB_SH
+CREDENTIAL -  OBJ_STORE_CRED
+
+
+SETTING UP OF DB OBJECTS:
+CREATE USER 
+--LOGIN AS ADMIN USER into ADB-- 
+  CREATE USER ADBUSER IDENTIFIED BY Xxx__XYZ123 CONTAINER=CURRENT;
+
+GRANT PRIVILEGES TO USER 
+--LOGIN AS ADMIN USER into ADB-- 
+  GRANT DWROLE TO ADBUSER; 
+  GRANT UNLIMITED TABLESPACE TO ADBUSER; 
+  GRANT CREATE ANY PROCEDURE TO ADBUSER; 
+  GRANT CREATE ANY DIRECTORY TO ADBUSER; 
+  GRANT EXECUTE ON DBMS_CLOUD TO ADBUSER;
+
+
+CREATE DB DIRECTORY 
+--LOGIN AS ADBUSER-- 
+  create or replace directory images as 'imagedir'; 
+  create or replace directory MEDIA_DIR_IMG_ACCESS as 'orig_imagedir';
+
+CREATE SEQUENCE 
+--LOGIN AS ADBUSER-- 
+CREATE SEQUENCE ADBUSER.ID START WITH 1;
+
+CREATE TABLE 
+--LOGIN AS ADBUSER-- 
+CREATE TABLE IMAGE_TABLE_BLOB (ID NUMBER, IMAGE BLOB, IMAGE_THUMBNAIL BLOB) LOB(IMAGE) STORE AS SECUREFILE (TABLESPACE MULTI_SF) LOB(IMAGE_THUMBNAIL) STORE AS SECUREFILE (TABLESPACE MULTI_SF);
+--LOGIN AS ADBUSER-- 
+CREATE TABLE ORIGINAL_IMAGES (ID NUMBER, ORG_IMAGE BLOB) LOB(ORG_IMAGE) STORE AS SECUREFILE (TABLESPACE MULTI_SF);
+
+CREATE CREDENTIAL
+Generate AUTH Token for the user which will be used to make execution calls to ADB
+Pass it as password below with username 
+
+--LOGIN AS ADBUSER—Make sure to replace highlighted text with actual values --
+begin 
+DBMS_CLOUD.CREATE_CREDENTIAL ( credential_name => 'OBJ_STORE_CRED', username => 'oracleidentitycloudservice/username@domain.com', password => 'XXXXXXXXXXXXXXXXXXXXX' ) ; 
+end;
+
+
+CREATE PROCEDURE 
+--LOGIN AS ADBUSER--—Make sure to replace highlighted text with actual values --
+CREATE OR REPLACE PROCEDURE ADBUSER.resize_image_sh_prc ( p_dir IN VARCHAR2, p_filename IN VARCHAR2, l_image_id IN image_table_blob.id%TYPE, p_type IN VARCHAR2) AS 
+--to read file from server-- 
+src_lob BFILE; 
+src_thumb_lob BFILE; 
+--to load into table-- 
+dest_lob BLOB; 
+dest_thumb_lob BLOB; 
+l_dest_offset INTEGER := 1; 
+l_src_offset INTEGER := 1; 
+p_filename_resize VARCHAR2(50);
+p_filename_thumb VARCHAR2(50); 
+url_link varchar2(200); 
+regionname varchar2(50); 
+tenancyname varchar2(50); 
+bucketname varchar2(50); 
+
+BEGIN 
+IF ( p_type = 'UPDATE' ) OR ( p_type = 'update' ) 
+THEN 
+--resize image on host-- 
+p_filename_thumb := 'thumbnail_'||p_filename; 
+p_filename_resize := 'standard_'||p_filename; 
+
+--update the table with new resized images-- 
+
+--standard size 190x190-- 
+BEGIN SELECT image INTO dest_lob FROM image_table_blob WHERE id = l_image_id FOR UPDATE; 
+src_lob := BFILENAME(p_dir, p_filename_resize); 
+DBMS_LOB.fileopen(src_lob, DBMS_LOB.file_readonly); 
+DBMS_LOB.trim(dest_lob, 0); 
+DBMS_LOB.loadblobfromfile ( dest_lob => dest_lob, src_bfile => src_lob, amount => DBMS_LOB.lobmaxsize, dest_offset => l_dest_offset, src_offset => l_src_offset); DBMS_LOB.fileclose(src_lob); 
+
+--thumbnail size 29x29-- 
+l_dest_offset := 1; 
+l_src_offset := 1; 
+SELECT image_thumbnail INTO dest_thumb_lob FROM image_table_blob WHERE id = l_image_id FOR UPDATE;
+src_thumb_lob := BFILENAME(p_dir, p_filename_thumb); 
+DBMS_LOB.fileopen(src_thumb_lob, DBMS_LOB.file_readonly); 
+DBMS_LOB.trim(dest_thumb_lob, 0); 
+DBMS_LOB.loadblobfromfile ( dest_lob => dest_thumb_lob, src_bfile => src_thumb_lob, amount => DBMS_LOB.lobmaxsize, dest_offset => l_dest_offset, src_offset => l_src_offset); DBMS_LOB.fileclose(src_thumb_lob); 
+END; 
+ELSIF ( p_type = 'DOWNLOAD' ) OR ( p_type = 'download' ) 
+THEN 
+regionname := 'us-ashburn-1'; 
+tenancyname := 'XXXXXXXXXXXXXXXXXXXXXXXXX'; 
+bucketname := 'YYYYYYYYYY'; 
+url_link := 'https://objectstorage.'||regionname||'.oraclecloud.com/n/'||tenancyname||'/b/'||bucketname||'/o/'||p_filename; 
+BEGIN 
+DBMS_CLOUD.GET_OBJECT(credential_name => 'OBJ_STORE_CRED',object_uri => url_link, directory_name => p_dir); 
+END; 
+ELSE 
+dbms_output.put_line('Error in input parameter.. Pass Either download/update');
+END IF; 
+EXCEPTION 
+WHEN others THEN DBMS_OUTPUT.PUT_LINE('Its error. Try again :)) '); 
+DBMS_OUTPUT.PUT_LINE('ERROR :' || SUBSTR(SQLERRM,1,250)); 
+DBMS_OUTPUT.PUT_LINE('ERROR :' || SQLCODE); 
+END ; 
+/
+
+CREATE FUNCTION 
+--LOGIN AS ADBUSER--—Make sure to replace highlighted text with actual values-- 
+CREATE OR REPLACE FUNCTION ADBUSER.file_to_blob_sh( p_dir IN VARCHAR2, p_filename IN VARCHAR2) RETURN image_table_blob.id%TYPE IS l_image_id image_table_blob.id%TYPE := 0; dest_lob BLOB; 
+l_dest_offset INTEGER := 1; 
+l_src_offset INTEGER := 1; 
+src_lob BFILE; 
+url_link varchar2(300); 
+regionname varchar2(50); 
+tenancyname varchar2(50); 
+bucketname varchar2(50); 
+BEGIN regionname := 'us-ashburn-1'; 
+tenancyname := 'YYYYYYYYYYYYYY'; 
+bucketname := 'XXXXXXXXXXX'; 
+url_link := 'https://objectstorage.'||regionname||'.oraclecloud.com/n/'||tenancyname||'/b/'||bucketname||'/o/'||p_filename; 
+
+BEGIN 
+DBMS_CLOUD.GET_OBJECT(credential_name => 'OBJ_STORE_CRED',object_uri => url_link,directory_name => p_dir); 
+END; 
+SELECT id.NEXTVAL INTO l_image_id FROM dual; 
+INSERT INTO image_table_blob (ID,image,image_thumbnail) VALUES(l_image_id, EMPTY_BLOB(),EMPTY_BLOB()) RETURNING IMAGE INTO dest_lob;
+
+src_lob := BFILENAME(p_dir, p_filename); 
+DBMS_LOB.OPEN(src_lob, DBMS_LOB.LOB_READONLY); 
+IF DBMS_LOB.getlength(src_lob) > 0 THEN 
+DBMS_LOB.loadblobfromfile ( dest_lob => dest_lob, src_bfile => src_lob, amount => DBMS_LOB.lobmaxsize, dest_offset => l_dest_offset, src_offset => l_src_offset); 
+END IF; 
+DBMS_LOB.fileclose(src_lob); 
+DBMS_LOB.CLOSE(src_lob); 
+COMMIT; 
+Begin DBMS_CLOUD.GET_OBJECT(credential_name => 'OBJ_STORE_CRED',object_uri => url_link,directory_name => 'MEDIA_DIR_IMG_ACCESS'); 
+end; 
+begin insert into original_images (ID,ORG_IMAGE) select id,image from image_table_blob where id=l_image_id; 
+commit; 
+end ; 
+RETURN l_image_id; 
+END; 
+/
+
+
+CREATE RESIZE SCRIPT 
+
+cd /home/oracle/images/ 
+vi image_manipulation.sh 
+
+##paste below content to the script— # Perform Image Manipulation using Image Magick #
+## Usage: image_manipulation.sh <Directory> <ImageFile> <Location of Image on server> ## 
+### Eg: sh image_manipulation_adbuser.sh 'IMAGES' 'DSC_0191.JPG' '/home/oracle/images' ### ################################################################################################### 
+
+if [ $# -ne 3 ]; then 
+  echo "Enter values for Directory and Image File along with Script execution: image_manipulation.sh <Directory> <ImageFile> <Location of Image on server>" 
+  exit 1 
+fi 
+
+p_dir=$1 
+p_filename=$2 
+l_image_dir=$3 
+
+#check if directory exists 
+if [ -z $l_image_dir ] then 
+echo "Null value provided" 
+exit 1 
+elif [ ! -d $l_image_dir ] then 
+echo "Non-existing Directory provided" 
+echo "Please check again for valid dir and privileges" 
+exit 1 
+fi 
+#change directory to where the images are located 
+cd $l_image_dir 
+#upload image to Object Storage 
+#Change bucket as per requirement 
+oci os object put --bucket-name bucket_xyz --file $p_filename 
+#Upload images to Table and retrieve sequence ID 
+#Change username/password and DB Connection string with acutal 
+l_image_id=`sqlplus -s adbuser/xxxx__YYYY_1234@ADB_high<<EOF 
+set serveroutput on;
+set feedback off; 
+DECLARE lv_msg VARCHAR2(250); 
+BEGIN 
+lv_msg := adbuser.file_to_blob_sh('$p_dir','$p_filename'); 
+dbms_output.put_line(lv_msg); 
+end; 
+/ 
+exit 
+EOF 
+` 
+
+echo "Sequence id for Image Inserted to table is : $l_image_id" 
+
+#resize Image 
+p_thumb_filename=`echo "thumbnail_"`$p_filename; 
+p_resize_filename=`echo "standard_"`$p_filename; 
+echo "Standard Image file name: $p_resize_filename" 
+echo "Thumbnail Image file name: $p_thumb_filename" 
+echo " convert $p_filename -resize 29x29! $p_thumb_filename convert $p_filename -resize 190x190! $p_resize_filename ">resize_image_sh.sh 
+chmod 755 resize_image_sh.sh 
+sh resize_image_sh.sh 
+if [ $? != 0 ]; then 
+  echo "Image conversion failed..Please check" 
+fi 
+
+#Upload Resized image to Object Storage Bucket 
+#Change Bucket name as required 
+oci os object put --bucket-name bucket_xyz --file $p_thumb_filename 
+oci os object put --bucket-name bucket_xyz --file $p_resize_filename 
+
+#update table with resized image 
+#Change username/password and DB Connection string with acutal 
+sqlplus -s adbuser/xxxx__YYYY_1234@ADB_high<<EOF 
+BEGIN
+resize_image_sh_prc('$p_dir','$p_thumb_filename','$l_image_id','DOWNLOAD'); 
+resize_image_sh_prc('$p_dir','$p_resize_filename','$l_image_id','DOWNLOAD'); 
+resize_image_sh_prc('$p_dir','$p_filename','$l_image_id','UPDATE'); 
+end; 
+/ 
+EOF
+
+
+EXECUTION:
+  ASSUMPTION:
+    Original Image is available in some Location on server which is accessible
+  EXECUTION:
+    Login to Compute Server
+    Execute Shell script “image_manipulation.sh” with Input parameters :
+    Parameter 1: DB DIRECTORY where images are available ( Eg: “IMAGES”)
+    Parameter 2: Image Name (Eg: “Winter.jpg”)
+    Parameter 3: Location of image on server (Eg: “/home/oracle/images”)
+
+  Example: 
+
+sh image_manipulation.sh 'IMAGES' 'TEST_IMG.JPG' '/home/oracle/images' 
+  Uploading object [####################################] 100% 
+  { "etag": "7ada26c1-509f-4c77-b10f-efa74d785191", "last-modified": "Wed, 13 May 2020 11:51:31 GMT", "opc-content-md5": "I21TKi15HaT3MCvDbeubXA==" } 
+  Sequence id for Image Inserted to table is : 23 
+  Standard Image file name: standard_TEST_IMG.JPG 
+  Thumbnail Image file name: thumbnail_TEST_IMG.JPG 
+  Uploading object [####################################] 100% 
+  { "etag": "82fc7a91-d345-4143-9d0b-e97c264d98fb", "last-modified": "Wed, 13 May 2020 11:51:43 GMT", "opc-content-md5": "177z0PeqLyfDH8cmN3NiVA==" } 
+  Uploading object [####################################] 100% 
+  { "etag": "f14be53d-fcf0-473d-b49a-fec5928305f0", "last-modified": "Wed, 13 May 2020 11:51:46 GMT",
+  "opc-content-md5": "vpbTsPDB3lB2KXXPSysxxg==" } 
+
+PL/SQL procedure successfully completed.
+
+
+WORKFLOW:
+1. Execute Shell script with required input parameters
+2. Uploads image to Object Storage bucket
+3. Execute Function on ADB which in-turn downloads the Image from Object Storage to DB Directory and Inserts the image to tables
+4. Resize of image is performed on compute server and then uploaded to Object Storage
+5. Procedure is executed which updates the table with resized image
+
+
+IMAGE_MANIPULATION.SH  ->
+  1.  OBJECT STORAGE
+  2.  FILE_TO_BLOB_SH
+      DOWNLOADS IMAGE TO DB DIRECTORY
+      INSERTS IMAGE INTO IMAGE_TABLE, ORIGINAL_IMAGES
+  3.  Execute host commands to resize images
+  4.  OBJECT STORAGE
+  5.  RESIZE_IMAGE_SH_PRC -> 
+        a.  DOWNLOADS IMAGE TO DB DIRECTORY
+        b.  UPDATES IMAGE_TABLE with NEW IMAGES
+
+
+
+
+
+
+
+ 5
