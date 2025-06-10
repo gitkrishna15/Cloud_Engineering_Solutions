@@ -1,0 +1,298 @@
+PERFORM IMAGE MANIPULATION USING APEX MEDIA EXTENSION
+
+
+ABOUT APEX MEDIA EXTENSION:
+APEX Media Extension (AME) makes it easy to process or convert media before or after it is stored in the Oracle Database. Using our Oracle Application Express (APEX) plug-in, PL/SQL API, and REST API you can:
+ - resize images
+ - rotate and flip images
+ - crop images
+ - add one or more watermarks or overlays (images and text) to images
+ - compress images
+ - greyscale images
+ - change image formats (jpg, png, ...)
+ - get image information (width, height, mime type, ...)
+ - read media metadata (Exif, IPTC and XMP)
+
+
+USE CASE OVERVIEW:
+  1.  Take an image and perform Resize of the image to 190*190 and 29*29 resolution
+  2.  Then upload the image (resized) to table IMAGE_TABLE_BLOB columns IMAGE and IMAGE_THUMBNAIL
+  3.  Upload the original image as it is into ORIGINAL_IMAGES
+
+
+CONNECTION TO AUTONOMOUS DATABASE:
+  Connect using Wallet available in console
+    https://docs.cloud.oracle.com/en-us/iaas/Content/Database/Tasks/adbconnecting.htm#access
+  
+  For Configuration below you can connect any way preferred
+   Using Sql-Developer
+   Using sqlplus connection via client from any server
+
+
+SET UP WORKSHOP:
+
+SET UP OVERVIEW (MANUAL):
+In-order to set up the complete scenario:
+ Register an account in Apex Media Extension(“https://www.apexmediaextension.com/index.html”)
+ Subscribe any model as per fit
+ Login to the account registered above
+ Save the API Key assigned to your user account
+ Download The AME package
+ Transfer the downloaded File to the any server (used for client connection)
+
+DOWNLOAD APEX Media Extension
+ Unzip the downloaded install file into a directory ( any directory of your choice )
+ Change directory to the db directory inside the unzipped structure
+ Connect to the User using which you want to perform the Resize operation
+      mkdir /home/oracle/ame
+      unzip –d /home/oracle/ame ame_cloud_v20.1.1.zip
+
+PRE-REQ TO INSTALLING AME
+  APEX and ORDS are pre-installed and available, validate the same.
+
+CREATE DB OBJECTS:
+  Below DB Objects would need to be created as part of setting up and providing the solution to process an image and store both original and processed image. 
+  Objects are created in the same sequence as they are mentioned below.
+
+  CREATE USER
+    New User where the table will exist
+  GRANT PRIVILEGES TO USER
+    Grant privileges to new user to perform all below tasks
+  AME DB OBJECTS
+    Package/Procedure/Synonym installed as part of AME Installation
+  CREATE DB DIRECTORY
+    Create DB Directories which will hold the images
+  CREATE SEQUENCE
+    Sequence to track ID for images uploaded
+  CREATE TABLE
+    Tables which hold images (original/resized images)
+  CREATE CREDENTIAL
+    Create Credential to execute in ADB
+  CREATE PROCEDURE
+    Procedures which take care of Insert/Update to Tables created above with correct Images and providing image details
+  
+LIST OF CREATED OBJECTS
+
+USER         -  ADBUSER
+GRANTS       -  (DWROLE),(CREATE ANY PROCEDURE), (EXECUTE ON DBMS_CLOUD), (UNLIMITED TABLESPACE),(CREATE ANY DIRECTORY)
+DIRECTORY    -  IMAGES, MEDIA_DIR_IMG_ACCESS
+TABLE        -  IMAGE_TABLE_BLOB, ORIGINAL_IMAGES
+PROCEDURE    -  RESIZE_IMAGE_AME_PRC, FILE_TO_BLOB_AME, IMAGE_DETAILS_AME
+SEQUENCE     -  ID
+SYNONYM      -  AME_API_PKG
+PACKAGE      -  AME_API20_PKG
+CREDENTIAL   -  OBJ_STORE_CRED
+
+
+SETTING UP OF DB OBJECTS:
+CREATE USER 
+--LOGIN AS ADMIN USER into ADB-- 
+  CREATE USER ADBUSER IDENTIFIED BY Xxx__XYZ123 CONTAINER=CURRENT;
+
+GRANT PRIVILEGES TO USER 
+--LOGIN AS ADMIN USER into ADB-- 
+  grant dwrole to ADBUSER; 
+  grant unlimited tablespace to ADBUSER; 
+  grant create any procedure to ADBUSER; 
+  grant create any directory to ADBUSER; 
+  grant execute on dbms_cloud to ADBUSER;
+
+
+INSTALL AME
+AME objects needs to be installed using ADBUSER, but make sure to edit below code before proceeding with install the objects. 
+Edit code in PACKAGE: “ame_api20_pkg” code (can be found in the “db” directory from unzipped install package)
+
+OLD: c_ame_url constant varchar2(50) := 'http://api.apexmediaextension.com/'; -- for https use 'https://www.apexofficeprint.com/ame/'
+
+NEW: c_ame_url constant varchar2(50) := 'https://www.apexofficeprint.com/ame/' – (http does not work for ADB ) for http use 'http://api.apexmediaextension.com/';
+
+Execute from client server as below: 
+  cd /home/oracle/ame/v20.1.1/db 
+  sqlplus ADBUSER/xxxxxxxxx@blkratp_high 
+  @install.sql
+Or
+  Copy the contents of install.sql and execute them in SQL Developer
+  When Using SSQL Developer make sure to execute the package compilation as below: 
+    ALTER PACKAGE ame_api20_pkg COMPILE;
+
+Ignore if you run into permission error for below execution: 
+  ALTER SESSION SET PLSQL_CODE_TYPE='NATIVE';
+
+Make sure the Objects installed are Successfully Compiled and VALID status
+
+
+
+
+CREATE DB DIRECTORY 
+--LOGIN AS ADBUSER-- 
+create or replace directory images as 'imagedir';
+create or replace directory MEDIA_DIR_IMG_ACCESS as 'orig_imagedir';
+
+CREATE SEQUENCE 
+--LOGIN AS ADBUSER-- 
+create sequence id start with 1;
+
+CREATE TABLE 
+--LOGIN AS ADBUSER-- 
+create table IMAGE_TABLE_BLOB (ID NUMBER,IMAGE BLOB,IMAGE_THUMBNAIL BLOB) LOB(IMAGE) STORE AS SECUREFILE (tablespace USERS) LOB(IMAGE_THUMBNAIL) STORE AS SECUREFILE (tablespace USERS);
+
+--LOGIN AS ADBUSER-- 
+create table ORIGINAL_IMAGES (ID NUMBER,ORG_IMAGE BLOB) LOB(ORG_IMAGE) STORE AS SECUREFILE (tablespace USERS);
+
+
+CREATE CREDENTIAL
+Generate AUTH Token
+Pass it as password below with username 
+
+--LOGIN AS ADBUSER-- 
+begin DBMS_CLOUD.CREATE_CREDENTIAL ( credential_name => 'OBJ_STORE_CRED', username => 'oracleidentitycloudservice/username@domain.com', password => 'XXXXXXXXXXXXXXXXXXXXX' ) ; end;
+
+
+CREATE PROCEDURE 
+--LOGIN AS ADBUSER—Change API Key inside the Procedure-- 
+CREATE OR REPLACE PROCEDURE ADBUSER.RESIZE_IMAGE_AME_PRC ( L_IMAGE_ID IN IMAGE_TABLE_BLOB.ID%TYPE,L_TYPE IN VARCHAR2) 
+AS   L_ORG_BLOB IMAGE_TABLE_BLOB.IMAGE%TYPE;
+     L_NEW_BLOB IMAGE_TABLE_BLOB.IMAGE%TYPE; 
+     L_NEW_THUMB_BLOB IMAGE_TABLE_BLOB.IMAGE_THUMBNAIL%TYPE; 
+BEGIN 
+--REPLACE THE BELOW HIGHLIGHTED VALUE XXXXXXXXXXXXXXXXXXX WITH API KEY ASSOCIATED WITH REGISTERED AME ACCOUNT--
+AME_API_PKG.G_API_KEY := 'XXXXXXXXXXXXXXXXXXX'; 
+SELECT IMAGE INTO L_ORG_BLOB FROM IMAGE_TABLE_BLOB WHERE ID = L_IMAGE_ID FOR UPDATE;
+
+--CHANGE RESOLUTION SIZES HIGHLIGTHED BELOW AS PER REQUIREMENT-- 
+IF ( L_TYPE = 'IMAGE' ) THEN 
+  L_NEW_BLOB := AME_API_PKG.CONVERT_IMAGE_B2(P_SOURCE_BLOB => L_ORG_BLOB,P_WIDTH => 190,P_HEIGHT => 190); 
+  UPDATE IMAGE_TABLE_BLOB SET IMAGE = L_NEW_BLOB WHERE ID = L_IMAGE_ID;
+  COMMIT; 
+ELSIF ( L_TYPE = 'IMAGE_THUMBNAIL' ) THEN 
+  L_NEW_THUMB_BLOB := AME_API_PKG.CONVERT_IMAGE_B2(P_SOURCE_BLOB => L_ORG_BLOB,P_WIDTH => 29,P_HEIGHT => 29);
+  UPDATE IMAGE_TABLE_BLOB SET IMAGE_THUMBNAIL = L_NEW_THUMB_BLOB WHERE ID = L_IMAGE_ID; 
+  COMMIT; 
+END IF; 
+EXCEPTION WHEN OTHERS THEN RAISE; 
+END;
+
+--LOGIN AS ADBUSER-- Change API Key inside the Procedure-- 
+
+CREATE OR REPLACE PROCEDURE ADBUSER.IMAGE_DETAILS_AME (L_IMAGE_ID IN IMAGE_TABLE_BLOB.ID%TYPE) 
+AS   L_ORIG_BLOB BLOB;
+     L_ORIG_THUMB_BLOB BLOB; 
+     L_WIDTH NUMBER(6); 
+     L_HEIGHT NUMBER(6); 
+     L_MIME_TYPE VARCHAR2(200); 
+     L_EXTENSION VARCHAR2(10); 
+     L_META_DATA CLOB; 
+BEGIN 
+SELECT IMAGE,IMAGE_THUMBNAIL INTO L_ORIG_BLOB,L_ORIG_THUMB_BLOB FROM IMAGE_TABLE_BLOB WHERE ID=L_IMAGE_ID;
+--REPLACE THE BELOW HIGHLIGHTED VALUE XXXXXXXXXXXXXXXXX WITH API KEY ASSOCIATED WITH REGISTERED AME ACCOUNT-- 
+AME_API_PKG.G_API_KEY := 'XXXXXXXXXXXXXXXXX'; 
+AME_API_PKG.GET_IMAGE_PROPERTIES( P_SOURCE_BLOB => L_ORIG_BLOB, O_WIDTH => L_WIDTH, O_HEIGHT => L_HEIGHT, O_MIME_TYPE => L_MIME_TYPE, O_EXTENSION => L_EXTENSION, O_META_DATA => L_META_DATA ); 
+DBMS_OUTPUT.PUT_LINE('IMAGE : ');
+DBMS_OUTPUT.PUT_LINE('IMAGE WIDTH: ' || TO_CHAR(L_WIDTH)); 
+DBMS_OUTPUT.PUT_LINE('IMAGE HEIGHT: ' || TO_CHAR(L_HEIGHT));
+DBMS_OUTPUT.PUT_LINE('MIME_TYPE: ' || L_MIME_TYPE);
+DBMS_OUTPUT.PUT_LINE('EXTENSION: ' || L_EXTENSION);
+AME_API_PKG.GET_IMAGE_PROPERTIES( P_SOURCE_BLOB => L_ORIG_THUMB_BLOB, O_WIDTH => L_WIDTH, O_HEIGHT => L_HEIGHT, O_MIME_TYPE => L_MIME_TYPE, O_EXTENSION => L_EXTENSION, O_META_DATA => L_META_DATA );
+DBMS_OUTPUT.PUT_LINE('IMAGE THUMBNAIL: ');
+DBMS_OUTPUT.PUT_LINE('IMAGE WIDTH: ' || TO_CHAR(L_WIDTH));
+DBMS_OUTPUT.PUT_LINE('IMAGE HEIGHT: ' || TO_CHAR(L_HEIGHT));
+DBMS_OUTPUT.PUT_LINE('MIME_TYPE: ' || L_MIME_TYPE); DBMS_OUTPUT.PUT_LINE('EXTENSION: ' || L_EXTENSION); END;
+/
+
+--LOGIN AS ADBUSER— Change Region/Bucket Name/Tenancy Name--
+
+CREATE OR REPLACE PROCEDURE ADBUSER.FILE_TO_BLOB_AME (P_DIR IN VARCHAR2,P_FILENAME IN VARCHAR2) 
+AS L_IMAGE_ID IMAGE_TABLE_BLOB.ID%TYPE; 
+   DEST_LOB BLOB; L_DEST_OFFSET INTEGER := 1;
+   L_SRC_OFFSET INTEGER := 1; 
+   SRC_LOB BFILE; 
+   URL_LINK VARCHAR2(200);
+   REGIONNAME VARCHAR2(50);
+   TENANCYNAME VARCHAR2(50);
+   BUCKETNAME VARCHAR2(50);
+BEGIN 
+  --REPLACE BELOW HIGHLIGHTED WITH CORRECT DATA AS PER YOUR REQUIREMENT-- 
+  REGIONNAME := 'US-ASHBURN-1'; 
+  TENANCYNAME := 'XXXXXXXXXXXXXX'; 
+  BUCKETNAME := 'YYYYYYYYYYYYYY'; 
+  URL_LINK := 'HTTPS://OBJECTSTORAGE.'||REGIONNAME||'.ORACLECLOUD.COM/n/'||TENANCYNAME||'/b/'||BUCKETNAME||'/o/'||P_FILENAME; 
+  DBMS_OUTPUT.PUT_LINE(URL_LINK); 
+  BEGIN   
+    DBMS_CLOUD.GET_OBJECT(CREDENTIAL_NAME => 'OBJ_STORE_CRED',OBJECT_URI => URL_LINK, DIRECTORY_NAME => 'IMAGES'); 
+  END; 
+  SELECT ID.NEXTVAL INTO L_IMAGE_ID FROM DUAL;
+  INSERT INTO IMAGE_TABLE_BLOB (ID,IMAGE,IMAGE_THUMBNAIL) VALUES(L_IMAGE_ID, EMPTY_BLOB(),EMPTY_BLOB()) RETURNING IMAGE INTO DEST_LOB;
+  SRC_LOB := BFILENAME(P_DIR, P_FILENAME); 
+  DBMS_LOB.OPEN(SRC_LOB, DBMS_LOB.LOB_READONLY);
+  IF DBMS_LOB.GETLENGTH(SRC_LOB) > 0 THEN DBMS_LOB.LOADBLOBFROMFILE ( DEST_LOB => DEST_LOB, SRC_BFILE => SRC_LOB, AMOUNT => DBMS_LOB.LOBMAXSIZE, DEST_OFFSET => L_DEST_OFFSET, SRC_OFFSET => L_SRC_OFFSET); 
+  END IF; 
+  DBMS_LOB.FILECLOSE(SRC_LOB);
+  DBMS_LOB.CLOSE(SRC_LOB);
+  COMMIT;
+  BEGIN DBMS_CLOUD.GET_OBJECT(CREDENTIAL_NAME => 'OBJ_STORE_CRED',OBJECT_URI => URL_LINK,DIRECTORY_NAME => 'MEDIA_DIR_IMG_ACCESS');
+  END; 
+  BEGIN INSERT INTO ORIGINAL_IMAGES (ID,ORG_IMAGE) SELECT ID,IMAGE FROM IMAGE_TABLE_BLOB WHERE ID=L_IMAGE_ID; 
+  END ; 
+  RESIZE_IMAGE_AME_PRC(L_IMAGE_ID,'IMAGE');
+  RESIZE_IMAGE_AME_PRC(L_IMAGE_ID,'IMAGE_THUMBNAIL');
+  END;
+
+
+
+EXECUTION:
+
+  ASSUMPTION:
+    Original Image is available in Object Storage Bucket
+  EXECUTION:
+    Login as ADBUSER
+    Execute Procedure “file_to_blob_ame” with Input parameters :
+    Parameter 1: DB DIRECTORY where image is available ( Eg: “IMAGES”)
+    Parameter 2: Image Name (Eg: “'revolt-164_6wVEHfI-unsplash.jpg”) 
+                  Example: 
+                  SQL> exec file_to_blob_ame('IMAGES','revolt-164_6wVEHfI-unsplash.jpg'); 
+                  PL/SQL procedure successfully completed. SQL>
+
+  WORKFLOW:
+    1. Inserts data into Tables
+    2. Executes Procedure for resize of image
+    3. Resize Procedure will connect to AME service and perform resize of the image and then updates the table with new images
+        FILE_TO_BLOB_AME       ->  INSERTS DATA INTO IMAGE_TABLE, ORIGINAL_IMAGES
+        FILE_TO_BLOB_AME       ->  RESIZE_IMAGE_AME_PRC
+        RESIZE_IMAGE_AME_PRC   ->  REST API CALL TO AME SERVICE , PERFORMS RESIZE OF IMAGE & UPDATES IMAGE_TABLE WITH NEW IMAGES
+        
+
+RUNBOOK:
+
+SELECT * FROM DBMS_CLOUD.LIST_OBJECTS('OBJ_STORE_CRED',
+'HTTPS://OBJECTSTORAGE.US-ASHBURN-1.ORACLECLOUD.COM/n/orasenatdhubsblue02/b/Krishna_bucket01/o/');
+
+truncate table image_table_blob;
+truncate table original_images;
+
+begin
+DBMS_CLOUD.DELETE_FILE (
+directory_name => 'IMAGES',
+file_name => 'Oracle_HD_Wallpaper.jpg'
+);
+end;
+
+begin
+DBMS_CLOUD.DELETE_FILE (
+directory_name => 'MEDIA_DIR_IMG_ACCESS',
+file_name => 'Oracle_HD_Wallpaper.jpg'
+);
+end;
+
+SELECT * FROM DBMS_CLOUD.LIST_FILES('IMAGES');
+SELECT * FROM DBMS_CLOUD.LIST_FILES('MEDIA_DIR_IMG_ACCESS');
+select * from image_table_blob;
+select * from original_images;
+
+begin
+file_to_blob_ame('IMAGES','Oracle_HD_Wallpaper.jpg');
+end;
+
+SELECT * FROM DBMS_CLOUD.LIST_FILES('IMAGES');
+SELECT * FROM DBMS_CLOUD.LIST_FILES('MEDIA_DIR_IMG_ACCESS');
+select * from image_table_blob;
+select * from original_images;
