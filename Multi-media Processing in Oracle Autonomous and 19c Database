@@ -1,0 +1,52 @@
+
+Multi-media Processing in Oracle Autonomous and 19c Database
+
+
+PROBLEM STATEMENT
+With de-support of Oracle Multimedia on Oracle Database starting 19c, there is a need to find  alternative solutions for customers who want to move to Database 19c or above (DB  system/ADB) and continue to store and use multimedia objects. As Customers move their database workload to Oracle Cloud, especially to Autonomous Database Cloud, where the latest 19c version gets provisioned, it is imperative to provide feasible alternatives to such Customers on storing and manipulating multimedia files. 
+
+SOLUTION
+With multiple spectrum of alternatives available, we went ahead with 2 solutions which were diverse in Pricing and Control over image manipulations: 
+Cloud-based Solution (Apex Media Extension/ Cloudinary/ Imgix) 
+and 
+Server-Side Solution (ImageMagick/ GraphicsMagick/ Thumbor)
+
+IMPACT
+Impact is high for those customers who have dependency to process a lot of images or multimedia in their application design. A comprehensive solution keeping performance benchmark at center of testing is available for customers to choose from.
+
+ 
+CLOUD BASED SOLUTIONS (APEX MEDIA EXTENSION / CLOUDINARY / IMGIX)
+
+AME/Cloudinary/Imgix – Provide you solutions which run on Cloud and provide you different subscription plans to execute API calls to perform media manipulation.
+
+APEX MEDIA EXTENSION
+Tool built on APEX to provide a cloud subscription model to execute API calls. Since the actual execution is done on the Cloud server side, one doesn’t have to worry about the server costs.
+The Solution needs to install PL/SQL codes or install APEX Plugin. Edit the code to include PLSQL API calls to AME cloud for media processing. Ideal when customer already has code written in PLSQL to use MultiMedia option available in earlier version.
+
+PROS
+	Available as Cloud subscription as well as On-Prem License to enable unlimited conversions
+	Availability of PL/SQL API 
+	Easy access to APEX Plugin which enables APEX on ADB Customers to easily import and start using the plugin
+
+CONS
+	Outbound I/O cost for API calls
+
+ 
+
+SERVER-SIDE SOLUTION (IMAGEMAGICK / GRAPHICSMAGICK / THUMBOR )
+
+ImageMagik/GraphicsMagick/Thumbor – Provide you Open Source Solutions and give you complete control of how and where you want to execute it.
+
+IMAGEMAGICK
+ImageMagick is free software delivered as a ready-to-run binary distribution or as source code that you may use, copy, modify, and distribute in both open and proprietary applications. It is distributed under a derived Apache 2.0 license. ImageMagick utilizes multiple computational threads to increase performance and can read, process, or write mega-, giga-, or tera-pixel image sizes.
+The Solution needs ImageMagick binary to be installed on the server where the media processing would be performed. Make Calls to Imagemagick executables to perform desired media manipulation. Ideal option when manipulation and programming are performed on server level.
+
+PROS
+	Open Source Solution doesn’t add additional licensing cost
+	Comes with wide range of utilities
+	Comes with binary for various OS (Unix/MacOS/Windows)
+	Provides multiple language support ( .NET/PHP/Python/JavaScript)
+CONS
+	Dependency on Host server CPU/Memory for Media Processing
+
+ 
