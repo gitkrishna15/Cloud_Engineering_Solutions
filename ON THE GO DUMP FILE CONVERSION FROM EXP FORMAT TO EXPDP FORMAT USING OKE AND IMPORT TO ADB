@@ -1,0 +1,384 @@
+ON THE GO DUMP FILE CONVERSION FROM EXP FORMAT TO EXPDP FORMAT USING OKE AND IMPORT TO ADB
+
+CUSTOMER USE-CASE 
+Customer currently uses Classic Export Dumps to import into current version of On-Prem Database on need basis for historical data. With migration to ADB, they will not be able to utilize the classic version anymore as its not supported by ADB. This makes all the old version dump files unusable in their current state to be imported to ADB. Customers have data as old as 8 to 12 years in dump files currently and converting them at one go from exp format to expdp format will be a huge task to perform. 
+
+SOLUTION 
+In-order to provide a solution wherein they would need minimal changes only and still work with old dump file (could be 8 years old as well) and keep using ADB for operations going ahead. We built a solution using DB container (19c) on OKE which would be created only when there is a need to import the historical data. 
+Based on customer's request the old classic dump file will be imported into OKE DB and then export the same data using latest expdp version which is compatible with ADB. In the same flow, we will import the new dump data to the ADB hence for the end user there is no changes and continues to fetch historical data. And in the backend the container is used only as long as the data needs to be fetched and since its container, multiple requests can be taken care of at a time via multiple containers. 
+
+SOLUTION ARCHITECTURE
+
+SOLUTION COMPONENTS
+
+The solution includes a Bastion, ADB, OCIR and OKE.
+Bastion:  Compute Instance(Master Node) which is used to access Private OKE nodes and build the solution
+ADB:      Autonomous Database where the final data needs to be uploaded
+OKE:      Node Pool and Worker nodes designed to host Database container
+OCIR:     Registry to store the Database Image required for container creation in OKE
+Object Storage:  Storage which consists of dump files
+GIT:      Access the base Database Container Image
+
+Major Steps Involved:
+1. Base Image preparation and setup which is a one-time setup.
+2. Execution of script which takes care of conversion and import of data successfully to ADB
+
+WORKFLOW 
+When an end user kicks off the process for import of historical data, it will kick off a script which in turn does the following: 
+1. Client Requests for Historical Data to be imported to ADB, Requests goes to Bastion Host 
+2. Bastion Host initiates process 
+  a. Create a new DB container in OKE 
+  b. OKE talks to OCIR and pulls the image for DB Container 
+  c. Spins up a New DB container 
+3. Download the required Dump file from Object Storage 
+4. Import the data in to Container DB using IMP 
+5. Export the data again from Container DB using EXPDP 
+6. Copy Dump file to source host location 
+7. Upload Dump file to Object Storage 
+8. Import the Dump file into ADB 
+9. Delete the Container once the import completes
+
+
+BASE IMAGE REQUIREMENTS:
+1. Create new VCN for Kubernetes and Bastion Host using Network Resource Configuration for Cluster Creation and Deployment (oracle.com)
+2. Create a Linux Compute Instance using Creating an Instance (oracle.com)
+3. Install OCI CLI using Quickstart and configure the oci cli using “oci setup config”
+4. Install Docker using sample instruction for Centos
+5. Install Kubectl using “sudo yum install kubectl –y”
+6. Install SQL Client using Instant Client installation Instructions
+7. Install Git using “sudo yum install git-all –y”
+8. Download Wallet from ADB
+9. Spin up new Kubernetes Cluster in OCI either using existing VCN or using Wizard as per your choice
+10. Create a repo in OCIR
+11. Accept Conditions at container registry of oracle for using the Database container image
+
+
+BASE IMAGE SETUP:
+Once the above requirements have been installed on the Host, proceed to setting up the below:
+1. Setup TNS_ADMIN for connection to Autonomous Database(target DB) 
+  sudo chown -R opc:opc /usr/lib/oracle/21/client64/lib/network 
+  cd /usr/lib/oracle/21/client64/lib/network/admin 
+  #copy wallet to this location 
+  unzip Wallet_adborcl.zip 
+  export TNS_ADMIN=/usr/lib/oracle/21/client64/lib/network/admin 
+  export PATH=$PATH:/usr/lib/oracle/21/client64/bin
+2. If any of the below Docker Steps were missed, please execute them 
+    sudo yum install -y yum-utils device-mapper-persistent-data lvm2 
+    sudo yum-config-manager --disable download.docker.com_linux_centos_docker-ce.re 
+    sudo yum-config-manager --add-repo https://download.docker.com/linux/centos/docker-ce.repo 
+    sudo yum-config-manager --save --setopt=docker-ce-stable.skip_if_unavailable=true sudo yum-config-manager --enable ol7_addons 
+    sudo yum install docker-engine -y 
+    sudo systemctl start docker 
+    sudo systemctl enable docker 
+    sudo docker run hello-world 
+    sudo usermod -aG docker $USER newgrp docker
+
+3. Perform Docker Setup to create a base image for DB Container
+  docker login container-registry.oracle.com
+  docker pull container-registry.oracle.com/database/enterprise:latest
+  docker images
+  docker tag <image id> iad.ocir.io/<tenancy name>/<registry name>:latest
+  docker login iad.ocir.io
+  --pass username as "Username: <tenancy name>/oracleidentitycloudservice/<username>"
+  docker push iad.ocir.io/<tenancy name>/<registry name>:latest
+4. Set up Kubernetes Config , ignore if already done any of the steps below
+  mkdir -p $HOME/.kube
+  oci ce cluster create-kubeconfig --cluster-id ocid1.cluster.oc1.iad.aaaaaaaan27vxwhivudf64zvhhbqzoqziagkaiht5wxivf2phcnbtvnbvyhq --file $HOME/.kube/config --region us-ashburn-1 --token-version 2.0.0
+  export KUBECONFIG=$HOME/.kube/config
+  kubectl get pods
+  kubectl get nodes
+5. Create yaml file as namespace.yaml. Make changes to the highlighted text if required
+  cat namespace.yaml
+  apiVersion: v1
+  kind: Namespace
+  metadata:
+  name: oracle-namespace
+6. Create yaml file as database19c.yaml. Make changes to the highlighted text if required
+  cat database19c.yaml
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+name: oracle19c
+namespace: oracle-namespace
+labels:
+app: database
+version: 19.3.0.1
+spec:
+replicas: 1
+selector:
+matchLabels:
+app: database
+version: 19.3.0.1
+template:
+metadata:
+name: oracle19c
+labels:
+app: database
+version: 19.3.0.1
+spec:
+securityContext:
+fsGroup: 54321
+containers:
+- name: oracle19c
+image: container-registry.oracle.com/database/enterprise:latest
+command:
+- /opt/oracle/runOracle.sh
+imagePullPolicy: IfNotPresent
+resources:
+requests:
+memory: 6Gi
+ports:
+- name: listener
+containerPort: 1521
+hostPort: 1521
+- name: oemexpress
+containerPort: 5500
+hostPort: 5500
+env:
+- name: ORACLE_SID
+valueFrom:
+configMapKeyRef:
+name: oradb #Read from a configmap called oradb
+key: ORACLE_SID #Read the key call ORALCE_SID
+- name: ORACLE_PDB
+valueFrom:
+configMapKeyRef:
+name: oradb #Read from a configmap called oradb
+key: ORACLE_PDB #Read the key call ORACLE_PDB
+- name: ORACLE_PWD
+valueFrom:
+configMapKeyRef:
+name: oradb #Read from a configmap called oradb
+key: ORACLE_PWD #Read the key call ORACLE_PWD
+- name: ORACLE_CHARACTERSET
+valueFrom:
+configMapKeyRef:
+name: oradb #Read from a configmap called oradb
+key: ORACLE_CHARACTERSET #Read the key call ORACLE_CHARACTERSET
+imagePullSecrets:
+- name: regcred
+---
+apiVersion: v1
+kind: Service
+metadata:
+name: oracle19c
+namespace: oracle-namespace
+labels:
+app: database
+version: 19.3.0.1
+spec:
+selector:
+app: database
+version: 19.3.0.1
+type: NodePort
+ports:
+- name: listener
+protocol: TCP
+port: 1521
+targetPort: 1521
+- name: oemexpress
+protocol: TCP
+port: 5500
+targetPort: 5500
+
+7. Create file as oracle.properties, change password and env value if required
+cat oracle.properties
+# Oracle 12.2
+DB_SID=PSTG
+DB_PDB=PSTGPDB1
+DB_PASSWD=*********
+DB_DOMAIN=localdomain
+DB_BUNDLE=basic
+DB_MEMORY=6g
+# Oracle 18xe
+ORACLE_CHARACTERSET=AL32UTF8
+ORACLE_PWD=**********
+# Oracle 19c
+ORACLE_SID=ORCL
+ORACLE_PDB=ORCLPDB1
+8. Perform below steps to create new container Pod
+kubectl apply -f namespace.yaml
+kubectl create configmap oradb --from-env-file=oracle.properties -n oracle-namespace
+docker login container-registry.oracle.com
+#####Use SSO user/password to authenticate above
+kubectl create secret generic regcred \
+--from-file=.dockerconfigjson=/home/opc/.docker/config.json --type=kubernetes.io/dockerconfigjson -n oracle-namespace
+
+9. Create Base Container Image
+kubectl apply -f database19c.yaml -n oracle-namespace
+
+10. Let the DB Come up and complete setup automatically, it takes close to 20-30 minutes for the whole process to complete. You can monitor the same via logs
+Kubectl get pods –n oracle-namespace
+Kubectl logs pods/<podname from above command> --follow
+
+11. Once the DB is up and running, connect to the worker node and commit and push the new state to OCIR
+Kubectl get nodes
+ssh <worker node IP from above>
+Docker login iad.ocir.io
+----- use Full user name including <tenancyname>/oracleidentitycloudservice/<username> for authentication
+docker ps
+------ Note the Container ID for the Running Container
+docker commit <container ID> iad.ocir.io/<tenancy>/<registry name>:<new tag name for latest image>
+docker images
+----- Check if the latest image is available with the tag name saved
+docker push iad.ocir.io/<tenancy>/<registry name>:<new tag name for latest image>
+
+12. Destroy the existing Container
+Kubectl delete –f database19c.yaml –n oracle-namespace
+
+13. Edit the database19c.yaml or Copy and create a new database19cQuick.yaml and use the latest image
+cat database19cQuick.yaml
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+name: oracle19c
+namespace: oracle-namespace
+labels:
+app: database
+version: 19.3.0.1
+spec:
+replicas: 1
+selector:
+matchLabels:
+app: database
+version: 19.3.0.1
+template:
+metadata:
+name: oracle19c
+labels:
+app: database
+version: 19.3.0.1
+spec:
+securityContext:
+fsGroup: 54321
+containers:
+- name: oracle19c
+image: iad.ocir.io/<tenancy name>/<registry name>:<latest Tag name>
+command:
+- /opt/oracle/runOracle.sh
+imagePullPolicy: Always
+resources:
+requests:
+memory: 6Gi
+ports:
+- name: listener
+containerPort: 1521
+hostPort: 1521
+- name: oemexpress
+containerPort: 5500
+hostPort: 5500
+env:
+- name: ORACLE_SID
+valueFrom:
+configMapKeyRef:
+name: oradb #Read from a configmap called oradb
+key: ORACLE_SID #Read the key call ORALCE_SID
+- name: ORACLE_PDB
+valueFrom:
+configMapKeyRef:
+name: oradb #Read from a configmap called oradb
+key: ORACLE_PDB #Read the key call ORACLE_PDB
+- name: ORACLE_PWD
+valueFrom:
+configMapKeyRef:
+name: oradb #Read from a configmap called oradb
+key: ORACLE_PWD #Read the key call ORACLE_PWD
+- name: ORACLE_CHARACTERSET
+valueFrom:
+configMapKeyRef:
+name: oradb #Read from a configmap called oradb
+key: ORACLE_CHARACTERSET #Read the key call ORACLE_CHARACTERSET
+imagePullSecrets:
+- name: regcred
+---
+apiVersion: v1
+kind: Service
+metadata:
+name: oracle19c
+namespace: oracle-namespace
+labels:
+app: database
+version: 19.3.0.1
+spec:
+selector:
+app: database
+version: 19.3.0.1
+type: NodePort
+ports:
+- name: listener
+protocol: TCP
+port: 1521
+targetPort: 1521
+- name: oemexpress
+protocol: TCP
+port: 5500
+targetPort: 5500
+
+14. Execute and create new Container and test if it comes up in 5 minutes
+Kubectl apply –f database19cQuick.yaml –n oracle-namespace
+
+15. Connect to database and test based on values in oracle.properties file
+sqlplus $USERNAME/$PASSWD@$DB_IPADDR:$DBPORT/$PDBNAME
+
+16. Destroy the container
+Kubectl delete –f database19c.yaml –n oracle-namespace
+
+17. Create a script which when executed will create the container and kickoff the workflow process
+cat Mainscript.sh
+kubectl apply -f database19cQuick.yaml -n oracle-namespace
+kubectl get nodes -n oracle-namespace >node_details.txt
+kubectl get pods -n oracle-namespace >pod_details.txt
+echo "
+CREATE USER books_admin IDENTIFIED BY ********;
+GRANT CONNECT, RESOURCE, DBA TO books_admin;
+GRANT UNLIMITED TABLESPACE TO books_admin;
+exit;">createuser.sql
+sleep 300
+echo "OK i am awake now after 5 minutes"
+echo
+export DB_IPADDR=`cat node_details.txt|awk '{print $1}'|tail -1`
+export USERNAME='system'
+export PASSWD='*********'
+export PDBNAME='ORCLPDB1'
+export CDBNAME='ORCL'
+export DBPORT=1521
+sqlplus $USERNAME/$PASSWD@$DB_IPADDR:$DBPORT/$PDBNAME @createuser.sql
+sqlplus sys/$PASSWD@$DB_IPADDR:$DBPORT/$PDBNAME as sysdba @createdbdir.sql
+export NLS_LANG=AMERICAN_AMERICA.AL32UTF8
+export DBDUMPFILE=Books_Toys_Tables.dmp
+export DMP_USER='books_admin'
+export DMP_PASSWD='***********'
+imp $DMP_USER/$DMP_PASSWD@$DB_IPADDR:$DBPORT/$PDBNAME file=$DBDUMPFILE log=imp_kubectl_log.txt FULL=y
+expdp $DMP_USER/$DMP_PASSWD@$DB_IPADDR:$DBPORT/$PDBNAME dumpfile=expdp_Books1_toys1_table%U.dmp logfile=expdp_Books1_toys1_table.log TABLES=BOOKS1,TOYS1 directory=PDB_DP_DIR
+export POD_NAME=`cat pod_details.txt|awk '{print $1}' |tail -1`
+kubectl cp $POD_NAME:/opt/oracle/admin/ORCL/dpdump ~/dpdump -n oracle-namespace
+ls -ltr expdp_Books1_toys1_table*.dmp|awk '{print $9}'>list_dumpfiles.txt
+oci os object put --bucket-name bucket-integration01 --file expdp_Books1_toys1_table*.dmp
+impdp books_admin/'**********'@adborcl_high directory=data_pump_dir dumpfile=https://objectstorage.us-ashburn-1.oraclecloud.com/n/<tenancy Name>/b/bucket-integration01/o/expdp_Books1_toys1_table%U.dmp credential=DBDATAPUMP_CRED
+sleep 60
+kubectl delete -f database19cQuick.yaml -n oracle-namespace
+rm -rf ~/dpdump/expdp_Books1_toys1_table*.dmp
+ASSUMPTIONS
+ Historical Dump files available are table Dump files
+ Total time for the DB container to be up and running is 5/7 minutes and then based on Import size the time to import/export will change.
+ In our test we used a simple table with 10 rows data and the whole process including above 5 minutes took less than 6 minutes
+ Customer needs to import table dump in to new tables in Autonomous database
+ The triggered script will contain passwords to connect to the Container Database and Autonomous Database.
+ Script will create a customer defined user based on source schema name of which the table was originally belonging to.
+ Script will be provided the name of the table which needs to be exported from the old dump data
+
+In the above script we have used below as examples:
+Source Schema:  Books_admin
+Source Dump file name  :Books_Toys_Tables.dmp
+Source Table to be exported  :BOOKS1,TOYS1
+Export Dump file name format:  expdp_Books1_toys1_table%U.dmp
+Source database NLS_LANG:  AMERICAN_AMERICA.AL32UTF8
+Target ADB DB Credential:  DBDATAPUMP_CRED
+Target ADB Name:  adborcl
+
+
+REFERENCES  
+https://medium.com/@ggajos/drop-db-startup-time-from-45-to-3-minutes-in-dockerized-oracle-19-3-0-552068593deb  
+https://docs.oracle.com/en-us/iaas/Content/Registry/Concepts/registrypolicyrepoaccess.htm#:~:text=You%20can%20then%20create%20policies,that%20belongs%20to%20the%20tenancy  https://apexapps.oracle.com/pls/apex/f?p=44785:50:3234596695243:::::  
+https://docs.oracle.com/en-us/iaas/Content/API/Concepts/cliconcepts.htm  
+https://docs.oracle.com/en/cloud/paas/autonomous-database/adbsa/connect-preparing.html#GUID-3667EC68-930E-4566-95B3-DFA24203A8FF  https://www.oracle.com/webfolder/technetwork/tutorials/obe/cloud/adwc/OBE_Loading%20Your%20Data/loading_your_data.html 
